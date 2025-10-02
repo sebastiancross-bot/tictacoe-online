@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tic‑Tac‑Toe — Play Online (PeerJS + URL fallback)</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',Arial;margin:0;padding:20px;background:#f6f8fa;color:#0b1220}
+  .container{max-width:760px;margin:0 auto}
+  header{display:flex;align-items:center;gap:12px}
+  h1{font-size:20px;margin:0}
+  .board{display:grid;grid-template-columns:repeat(3,100px);gap:6px;margin:18px 0}
+  .cell{width:100px;height:100px;background:white;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:48px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,0.08)}
+  .cell.disabled{cursor:not-allowed;opacity:0.6}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  input,button,select{padding:8px;border-radius:6px;border:1px solid #d1d5db}
+  .note{font-size:13px;color:#374151;margin-top:12px}
+  .log{white-space:pre-wrap;background:#fff;padding:12px;border-radius:8px;border:1px solid #e5e7eb;margin-top:12px}
+  .small{font-size:13px;color:#555}
+  .status{margin-top:10px;font-weight:600}
+  .row{display:flex;gap:8px;align-items:center}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Tic‑Tac‑Toe — Play Online</h1>
+  </header>
+
+  <p class="note">This single HTML file lets two players play in real-time using PeerJS (WebRTC). If PeerJS isn't available, there's a URL-based fallback: you can share a link that encodes the current board — the other player opens it, plays, and sends back the updated link. For best experience open this file from a web server or GitHub Pages; it also works locally if both players can access the same URL.</p>
+
+  <div class="controls">
+    <label>Player name: <input id="name" value="Player"></label>
+    <label>Your mark: <select id="mark"><option>X</option><option>O</option></select></label>
+    <button id="createRoom">Create room (PeerJS)</button>
+    <button id="joinRoom">Join room (PeerJS)</button>
+    <input id="roomIdInput" placeholder="room id (or paste)" style="min-width:180px">
+    <button id="shareLink">Share link</button>
+    <button id="useFallback">Use URL fallback</button>
+  </div>
+
+  <div class="status" id="status">Not connected</div>
+
+  <div class="board" id="board"></div>
+
+  <div class="row">
+    <button id="reset">Reset board</button>
+    <button id="copyLink">Copy current share link</button>
+  </div>
+
+  <div class="log" id="log">Log:
+</div>
+
+  <p class="small">Notes: When using PeerJS this page uses a public PeerJS broker by default (PeerServer). If that service is unreachable the fallback URL method still works. The fallback requires exchanging links manually after each move.</p>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+<script>
+// TicTacToe with PeerJS datachannel and URL-encoded fallback
+const boardEl = document.getElementById('board');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const nameInput = document.getElementById('name');
+const markSelect = document.getElementById('mark');
+const roomIdInput = document.getElementById('roomIdInput');
+const createRoomBtn = document.getElementById('createRoom');
+const joinRoomBtn = document.getElementById('joinRoom');
+const shareLinkBtn = document.getElementById('shareLink');
+const useFallbackBtn = document.getElementById('useFallback');
+const resetBtn = document.getElementById('reset');
+const copyLinkBtn = document.getElementById('copyLink');
+
+let board = Array(9).fill('');
+let myMark = 'X';
+let myName = 'Player';
+let turn = 'X';
+let peer = null;
+let conn = null;
+let roomId = null;
+let usingFallback = false;
+
+function log(...args){ logEl.textContent += '\n' + args.join(' '); logEl.scrollTop = logEl.scrollHeight; }
+
+function render(){
+  boardEl.innerHTML = '';
+  for(let i=0;i<9;i++){
+    const cell = document.createElement('div');
+    cell.className = 'cell' + (board[i] ? ' disabled' : '');
+    cell.dataset.index = i;
+    cell.textContent = board[i];
+    cell.onclick = () => onCellClick(i);
+    boardEl.appendChild(cell);
+  }
+  statusEl.textContent = `You: ${myName} (${myMark}) — Turn: ${turn}`;
+}
+
+function onCellClick(i){
+  if(board[i] || turn !== myMark) return;
+  board[i] = myMark;
+  turn = (turn === 'X') ? 'O' : 'X';
+  render();
+  sendState();
+  checkGame();
+}
+
+function checkGame(){
+  const wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+  for(const w of wins){
+    const [a,b,c]=w;
+    if(board[a] && board[a]===board[b] && board[b]===board[c]){
+      statusEl.textContent = `Winner: ${board[a]}!`;
+      log('Game over: winner', board[a]);
+      return true;
+    }
+  }
+  if(board.every(Boolean)){
+    statusEl.textContent = 'Draw';
+    log('Game over: draw');
+    return true;
+  }
+  return false;
+}
+
+function packState(){
+  return JSON.stringify({board,turn});
+}
+function unpackState(s){
+  try{ const obj = JSON.parse(s); if(obj.board) {board = obj.board; turn = obj.turn || 'X'; render(); } }
+  catch(e){log('Invalid state received')}
+}
+
+function sendState(){
+  const s = packState();
+  if(conn && conn.open){ conn.send({type:'state',payload:s}); log('Sent state via Peer'); }
+  // nothing else: fallback expects you to share link manually
+}
+
+createRoomBtn.onclick = async ()=>{
+  usingFallback = false;
+  myName = nameInput.value || 'Player';
+  myMark = markSelect.value;
+  peer = new Peer();
+  peer.on('open', id => {
+    roomId = id;
+    roomIdInput.value = id;
+    log('Peer ready. Room id:', id);
+    statusEl.textContent = `Created room: ${id} — waiting for opponent...`;
+  });
+  peer.on('connection', c => {
+    conn = c;
+    conn.on('open', ()=>{
+      log('Peer connected:', conn.peer);
+      statusEl.textContent = `Connected to ${conn.peer}`;
+      conn.on('data', onPeerData);
+      // send initial state
+      conn.send({type:'hello',payload:{name:myName,mark:myMark}});
+      sendState();
+    });
+  });
+  peer.on('error', err => { log('Peer error', err); statusEl.textContent = 'Peer error — fallback may be used'; });
+}
+
+joinRoomBtn.onclick = ()=>{
+  usingFallback = false;
+  myName = nameInput.value || 'Player';
+  myMark = markSelect.value;
+  const target = roomIdInput.value.trim();
+  if(!target){ alert('Paste a room id to join'); return; }
+  peer = new Peer();
+  peer.on('open', id => {
+    log('Joined as', id);
+    conn = peer.connect(target);
+    conn.on('open', ()=>{
+      log('Connected to host', target);
+      statusEl.textContent = `Connected to ${target}`;
+      conn.on('data', onPeerData);
+      conn.send({type:'hello',payload:{name:myName,mark:myMark}});
+    });
+  });
+  peer.on('error', err => { log('Peer error', err); statusEl.textContent = 'Peer error — fallback may be used'; });
+}
+
+function onPeerData(data){
+  if(data.type === 'hello'){
+    log('Hello from peer', data.payload);
+  } else if(data.type === 'state'){
+    unpackState(data.payload);
+    log('State received from peer');
+  } else if(data.type === 'chat'){
+    log('Chat:', data.payload);
+  }
+}
+
+shareLinkBtn.onclick = ()=>{
+  // create a shareable link that encodes room id or board state
+  if(!usingFallback && roomId){
+    const url = new URL(location.href);
+    url.searchParams.set('room', roomId);
+    url.searchParams.set('name', nameInput.value||'Player');
+    url.searchParams.set('mark', markSelect.value||myMark);
+    prompt('Share this link with your friend to join via PeerJS:', url.toString());
+  } else {
+    const url = new URL(location.href);
+    url.searchParams.set('state', encodeURIComponent(packState()));
+    prompt('Share this link with your friend (fallback): after they play, ask them to send you their new link back', url.toString());
+  }
+}
+
+useFallbackBtn.onclick = ()=>{
+  usingFallback = true;
+  alert('Fallback mode enabled: use the "Share link" button to copy a URL with board state. The other player opens it, makes a move, then shares their updated link back. This requires manual link exchange.');
+}
+
+// If URL has state or room param on load, handle it
+(function handleURL(){
+  const params = new URLSearchParams(location.search);
+  if(params.has('state')){
+    try{
+      const st = decodeURIComponent(params.get('state'));
+      unpackState(st);
+      usingFallback = true;
+      log('Loaded board from URL');
+    }catch(e){log('Failed to parse state param')}
+  }
+  if(params.has('room')){
+    roomIdInput.value = params.get('room');
+    log('Room id found in URL');
+  }
+  if(params.has('name')) nameInput.value = params.get('name');
+  if(params.has('mark')) markSelect.value = params.get('mark');
+})();
+
+resetBtn.onclick = ()=>{
+  if(!confirm('Reset board?')) return;
+  board = Array(9).fill(''); turn = 'X'; render(); sendState(); }
+
+copyLinkBtn.onclick = ()=>{
+  const url = new URL(location.href);
+  url.searchParams.set('state', encodeURIComponent(packState()));
+  navigator.clipboard.writeText(url.toString()).then(()=>{ alert('Copied link to clipboard'); }).catch(()=>{ prompt('Copy this link', url.toString()); });
+}
+
+// Initialize board UI
+render();
+
+// Also: if both players open same URL with same room id and both create/join, it should connect
+
+</script>
+</body>
+</html>
